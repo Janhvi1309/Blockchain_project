@@ -1,11 +1,7 @@
-// src/App.jsx
+
 import { useCallback, useEffect, useState } from "react";
-import {
-  connectWallet,
-  getConnectedWallet,
-  getReadOnlyContract,
-  contractAddress
-} from "./contract";
+import { getContract, CONTRACT_ADDRESS } from "./contract";
+import { lookupTAC } from "./tacLookup";
 import ProductQR from "./ProductQR";
 import "./App.css";
 
@@ -27,42 +23,56 @@ function App() {
   const [contract, setContract] = useState(null);
   const [role, setRole] = useState(0);
   const [admin, setAdmin] = useState("");
+
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
-  // Admin: assign a role
+  // Role assignment
   const [roleAddress, setRoleAddress] = useState("");
   const [selectedRole, setSelectedRole] = useState("1");
 
-  // Manufacturer: register a product
-  const [productId, setProductId] = useState("");
-  const [productName, setProductName] = useState("");
-  const [manufacturerName, setManufacturerName] = useState("");
-  const [registeredProductId, setRegisteredProductId] = useState("");
+  // Smartphone registration
+  const [imei, setImei] = useState("");
+  const [brand, setBrand] = useState("");
+  const [model, setModel] = useState("");
+  const [manufacturer, setManufacturer] = useState("");
+  const [registeredPhoneId, setRegisteredPhoneId] = useState("");
 
-  // Look up existing products and regenerate QR codes
-  const [qrLookupId, setQrLookupId] = useState("");
-  const [qrProductId, setQrProductId] = useState("");
-  const [qrProductDetails, setQrProductDetails] = useState(null);
+  // TAC lookup
+  const [tacResult, setTacResult] = useState(null);
+  const [tacLoading, setTacLoading] = useState(false);
 
-  // Verify a product
-  const [verifyId, setVerifyId] = useState("");
+  // IMEI verification
+  const [verifyIMEI, setVerifyIMEI] = useState("");
   const [verificationResult, setVerificationResult] = useState(null);
 
-  // Transfer ownership
-  const [transferId, setTransferId] = useState("");
+  // Ownership transfer using IMEI
+  const [transferIMEI, setTransferIMEI] = useState("");
   const [newOwner, setNewOwner] = useState("");
 
-  // Ownership history
-  const [historyId, setHistoryId] = useState("");
+  // Ownership history using IMEI
+  const [historyIMEI, setHistoryIMEI] = useState("");
   const [history, setHistory] = useState([]);
+
+  // QR lookup
+  const [qrPhoneId, setQrPhoneId] = useState("");
+  const [qrDetails, setQrDetails] = useState(null);
+
+  const isAdmin =
+    account &&
+    admin &&
+    account.toLowerCase() === admin.toLowerCase();
 
   const refreshWallet = useCallback(async () => {
     try {
-      const wallet = await getConnectedWallet();
+      if (!window.ethereum) return;
 
-      if (!wallet) {
+      const accounts = await window.ethereum.request({
+        method: "eth_accounts"
+      });
+
+      if (!accounts.length) {
         setAccount("");
         setContract(null);
         setRole(0);
@@ -70,28 +80,26 @@ function App() {
         return;
       }
 
+      const walletContract = await getContract(true);
+
       const [walletRole, contractAdmin] = await Promise.all([
-        wallet.contract.roles(wallet.account),
-        wallet.contract.admin()
+        walletContract.roles(accounts[0]),
+        walletContract.admin()
       ]);
 
-      setAccount(wallet.account);
-      setContract(wallet.contract);
+      setAccount(accounts[0]);
+      setContract(walletContract);
       setRole(Number(walletRole));
       setAdmin(contractAdmin);
     } catch (err) {
-      setAccount("");
-      setContract(null);
-      setRole(0);
-      setAdmin("");
-      setError(err.message || "Unable to refresh the connected wallet.");
+      setError(err.message || "Unable to connect wallet.");
     }
   }, []);
 
   useEffect(() => {
     refreshWallet();
 
-    if (!window.ethereum) return undefined;
+    if (!window.ethereum) return;
 
     const handleAccountsChanged = () => {
       setMessage("");
@@ -99,9 +107,7 @@ function App() {
       refreshWallet();
     };
 
-    const handleChainChanged = () => {
-      window.location.reload();
-    };
+    const handleChainChanged = () => window.location.reload();
 
     window.ethereum.on("accountsChanged", handleAccountsChanged);
     window.ethereum.on("chainChanged", handleChainChanged);
@@ -111,17 +117,13 @@ function App() {
         "accountsChanged",
         handleAccountsChanged
       );
+
       window.ethereum.removeListener(
         "chainChanged",
         handleChainChanged
       );
     };
   }, [refreshWallet]);
-
-  const isAdmin =
-    account &&
-    admin &&
-    account.toLowerCase() === admin.toLowerCase();
 
   async function runAction(action, successMessage) {
     setBusy(true);
@@ -130,226 +132,274 @@ function App() {
 
     try {
       await action();
-      if (successMessage) setMessage(successMessage);
+
+      if (successMessage) {
+        setMessage(successMessage);
+      }
     } catch (err) {
       console.error(err);
+
       setError(
-        err?.shortMessage ||
-          err?.reason ||
-          err?.message ||
-          "The operation failed."
+        err.shortMessage ||
+        err.reason ||
+        err.message ||
+        "Operation failed."
       );
     } finally {
       setBusy(false);
     }
   }
 
+  // Connect MetaMask
   async function handleConnectWallet() {
     await runAction(async () => {
-      const wallet = await connectWallet();
+      if (!window.ethereum) {
+        throw new Error("Please install MetaMask.");
+      }
+
+      await window.ethereum.request({
+        method: "eth_requestAccounts"
+      });
+
+      const walletContract = await getContract(true);
+      const signer = await walletContract.runner.getAddress();
+
       const [walletRole, contractAdmin] = await Promise.all([
-        wallet.contract.roles(wallet.account),
-        wallet.contract.admin()
+        walletContract.roles(signer),
+        walletContract.admin()
       ]);
 
-      setAccount(wallet.account);
-      setContract(wallet.contract);
+      setAccount(signer);
+      setContract(walletContract);
       setRole(Number(walletRole));
       setAdmin(contractAdmin);
     }, "Wallet connected successfully.");
   }
 
+  // Assign roles
   async function handleAssignRole(event) {
     event.preventDefault();
 
-    if (!ethersAddressIsValid(roleAddress)) {
-      setError("Enter a valid Ethereum wallet address.");
+    if (!/^0x[a-fA-F0-9]{40}$/.test(roleAddress.trim())) {
+      setError("Enter a valid wallet address.");
       return;
     }
 
     await runAction(async () => {
-      if (!contract) throw new Error("Connect your admin wallet first.");
+      if (!contract || !isAdmin) {
+        throw new Error("Connect your admin wallet first.");
+      }
 
       const tx = await contract.assignRole(
         roleAddress.trim(),
         Number(selectedRole)
       );
+
       await tx.wait();
 
       setRoleAddress("");
     }, "Role assigned successfully.");
   }
 
-  async function handleRegisterProduct(event) {
+  // Automatic TAC lookup when IMEI is entered
+  async function handleIMEIChange(value) {
+    const cleanValue = value.replace(/\D/g, "").slice(0, 15);
+
+    setImei(cleanValue);
+    setTacResult(null);
+    setBrand("");
+    setModel("");
+    setError("");
+
+    if (!/^\d{15}$/.test(cleanValue)) {
+      setTacLoading(false);
+      return;
+    }
+
+    setTacLoading(true);
+
+    try {
+      const result = await lookupTAC(cleanValue);
+
+      setTacResult(result);
+
+      if (result.found) {
+        setBrand(result.brand || "");
+        setModel(result.model || "");
+      }
+    } catch (err) {
+      console.error(err);
+      setError(err.message || "TAC lookup failed.");
+    } finally {
+      setTacLoading(false);
+    }
+  }
+
+  // Register smartphone
+  async function handleRegisterSmartphone(event) {
     event.preventDefault();
 
-    if (!productId.trim() || !productName.trim() || !manufacturerName.trim()) {
-      setError("Please fill in all product registration fields.");
+    if (
+      !imei.trim() ||
+      !brand.trim() ||
+      !model.trim() ||
+      !manufacturer.trim()
+    ) {
+      setError("Please fill in all smartphone details.");
       return;
     }
 
     await runAction(async () => {
-      if (!contract) throw new Error("Connect your wallet first.");
-      if (role !== 1) {
-        throw new Error("Only a Manufacturer can register products.");
+      if (!contract) {
+        throw new Error("Connect your wallet first.");
       }
 
-      const exists = await contract.verifyProduct(BigInt(productId));
-      if (exists) throw new Error("This product ID is already registered.");
+      if (role !== 1) {
+        throw new Error("Only Manufacturers can register smartphones.");
+      }
 
-      const tx = await contract.registerProduct(
-        BigInt(productId),
-        productName.trim(),
-        manufacturerName.trim()
+      const valid = await contract.isValidIMEI(imei.trim());
+
+      if (!valid) {
+        throw new Error("Invalid IMEI. Enter a valid 15-digit IMEI.");
+      }
+
+      const result = await contract.verifyIMEI(imei.trim());
+
+      if (result.registered) {
+        throw new Error("This IMEI is already registered.");
+      }
+
+      const tx = await contract.registerSmartphone(
+        imei.trim(),
+        brand.trim(),
+        model.trim(),
+        manufacturer.trim()
       );
+
       await tx.wait();
 
-      const savedId = productId.trim();
+      const verification = await contract.verifyIMEI(imei.trim());
 
-      setRegisteredProductId(savedId);
+      setRegisteredPhoneId(verification.phoneId.toString());
 
-      // Also make the newly registered product available in the
-      // permanent QR lookup section.
-      setQrLookupId(savedId);
-      setQrProductId(savedId);
-
-      const details = await getReadOnlyContract().getProduct(BigInt(savedId));
-      setQrProductDetails({
-        id: details.id.toString(),
-        name: details.name,
-        manufacturer: details.manufacturer,
-        currentOwner: details.currentOwner,
-        registeredAt: details.registeredAt.toString()
-      });
-
-      setProductId("");
-      setProductName("");
-      setManufacturerName("");
-    }, "Product registered successfully.");
+      setImei("");
+      setBrand("");
+      setModel("");
+      setManufacturer("");
+      setTacResult(null);
+    }, "Smartphone registered successfully.");
   }
 
-  async function handleGenerateExistingQR(event) {
+  // Verify IMEI
+  async function handleVerifyIMEI(event) {
     event.preventDefault();
 
     await runAction(async () => {
-      const id = qrLookupId.trim();
+      const readContract = await getContract(false);
+      const enteredIMEI = verifyIMEI.trim();
 
-      if (!id || !/^\d+$/.test(id)) {
-        throw new Error("Enter a valid numeric product ID.");
-      }
+      const result = await readContract.verifyIMEI(enteredIMEI);
 
-      // Read-only access means a wallet is not required for this lookup.
-      const readContract = getReadOnlyContract();
-      const exists = await readContract.verifyProduct(BigInt(id));
-
-      if (!exists) {
-        setQrProductId("");
-        setQrProductDetails(null);
-        throw new Error(`Product ID ${id} was not found on Sepolia.`);
-      }
-
-      const details = await readContract.getProduct(BigInt(id));
-
-      setQrProductId(id);
-      setQrProductDetails({
-        id: details.id.toString(),
-        name: details.name,
-        manufacturer: details.manufacturer,
-        currentOwner: details.currentOwner,
-        registeredAt: details.registeredAt.toString()
-      });
-    }, "Product found. Its QR code is ready.");
-  }
-
-  async function handleVerifyProduct(event) {
-    event.preventDefault();
-
-    await runAction(async () => {
-      const id = verifyId.trim();
-
-      if (!id || !/^\d+$/.test(id)) {
-        throw new Error("Enter a valid numeric product ID.");
-      }
-
-      const readContract = getReadOnlyContract();
-      const exists = await readContract.verifyProduct(BigInt(id));
-
-      if (!exists) {
-        setVerificationResult({
-          exists: false,
-          id
-        });
+      if (!result.validFormat) {
+        setVerificationResult({ status: "invalid" });
         return;
       }
 
-      const details = await readContract.getProduct(BigInt(id));
+      if (!result.registered) {
+        setVerificationResult({ status: "notRegistered" });
+        return;
+      }
+
+      const details = await readContract.getSmartphoneByIMEI(
+        enteredIMEI
+      );
 
       setVerificationResult({
-        exists: true,
+        status: "registered",
         id: details.id.toString(),
-        name: details.name,
+        brand: details.brand,
+        model: details.model,
         manufacturer: details.manufacturer,
         currentOwner: details.currentOwner,
         registeredAt: details.registeredAt.toString()
       });
-    }, "Product verification completed.");
+    }, "IMEI verification completed.");
   }
 
+  // Transfer ownership using IMEI
   async function handleTransferOwnership(event) {
     event.preventDefault();
 
-    if (!ethersAddressIsValid(newOwner)) {
+    if (!/^0x[a-fA-F0-9]{40}$/.test(newOwner.trim())) {
       setError("Enter a valid new-owner wallet address.");
       return;
     }
 
     await runAction(async () => {
-      if (!contract) throw new Error("Connect your wallet first.");
-
-      if (![1, 2, 3].includes(role)) {
-        throw new Error(
-          "Only Manufacturers, Suppliers, and Retailers can transfer ownership."
-        );
+      if (!contract) {
+        throw new Error("Connect your wallet first.");
       }
 
-      if (!transferId.trim() || !/^\d+$/.test(transferId.trim())) {
-        throw new Error("Enter a valid numeric product ID.");
+      if (![1, 2, 3].includes(role)) {
+        throw new Error("Your role cannot transfer ownership.");
+      }
+
+      const enteredIMEI = transferIMEI.trim();
+
+      const valid = await contract.isValidIMEI(enteredIMEI);
+
+      if (!valid) {
+        throw new Error("Invalid IMEI number.");
+      }
+
+      const result = await contract.verifyIMEI(enteredIMEI);
+
+      if (!result.registered) {
+        throw new Error("This IMEI is not registered.");
       }
 
       const tx = await contract.transferOwnership(
-        BigInt(transferId),
+        result.phoneId,
         newOwner.trim()
       );
+
       await tx.wait();
 
       setNewOwner("");
-    }, "Ownership transferred successfully.");
+      setTransferIMEI("");
+    }, "Smartphone ownership transferred successfully.");
   }
 
+  // Ownership history using IMEI
   async function handleLoadHistory(event) {
     event.preventDefault();
 
     await runAction(async () => {
-      const id = historyId.trim();
+      const enteredIMEI = historyIMEI.trim();
+      const readContract = await getContract(false);
 
-      if (!id || !/^\d+$/.test(id)) {
-        throw new Error("Enter a valid numeric product ID.");
+      const result = await readContract.verifyIMEI(enteredIMEI);
+
+      if (!result.validFormat) {
+        throw new Error("Invalid IMEI number.");
       }
 
-      const readContract = getReadOnlyContract();
-      const exists = await readContract.verifyProduct(BigInt(id));
+      if (!result.registered) {
+        throw new Error("This IMEI is not registered.");
+      }
 
-      if (!exists) throw new Error(`Product ID ${id} was not found.`);
+      const phoneId = result.phoneId;
 
       const count = Number(
-        await readContract.getTransferCount(BigInt(id))
+        await readContract.getTransferCount(phoneId)
       );
 
       const records = await Promise.all(
         Array.from({ length: count }, async (_, index) => {
           const record = await readContract.getTransferRecord(
-            BigInt(id),
-            BigInt(index)
+            phoneId,
+            index
           );
 
           return {
@@ -361,354 +411,380 @@ function App() {
       );
 
       setHistory(records);
-    }, "Ownership history loaded.");
+    }, "Ownership history loaded successfully.");
+  }
+
+  // QR lookup
+  async function handleQRLookup(event) {
+    event.preventDefault();
+
+    await runAction(async () => {
+      const id = qrPhoneId.trim();
+
+      if (!/^\d+$/.test(id)) {
+        throw new Error("Enter a valid smartphone ID.");
+      }
+
+      const readContract = await getContract(false);
+      const details = await readContract.getSmartphoneById(id);
+
+      setQrDetails({
+        id: details.id.toString(),
+        brand: details.brand,
+        model: details.model,
+        manufacturer: details.manufacturer,
+        currentOwner: details.currentOwner
+      });
+    }, "Smartphone found. QR code is ready.");
   }
 
   return (
     <main className="app">
+
       <header className="app-header">
-        <h1>Blockchain Product Traceability</h1>
+        <h1>Smartphone Authenticity & Traceability</h1>
+
         <p>
-          Register products, transfer ownership, and verify product history
-          using the Ethereum Sepolia test network.
+          Verify smartphones using IMEI and track ownership
+          history on the Ethereum Sepolia blockchain.
         </p>
 
-        <button
-          type="button"
-          onClick={handleConnectWallet}
-          disabled={busy}
-        >
+        <button onClick={handleConnectWallet} disabled={busy}>
           {account ? "Wallet Connected" : "Connect MetaMask"}
         </button>
 
         {account && (
           <div className="wallet-info">
-            <p>
-              <strong>Connected account:</strong> {shortenAddress(account)}
-            </p>
-            <p>
-              <strong>Your role:</strong> {ROLE_NAMES[role] || "Unassigned"}
-            </p>
+            <p><strong>Account:</strong> {shortenAddress(account)}</p>
+            <p><strong>Role:</strong> {ROLE_NAMES[role]}</p>
           </div>
         )}
       </header>
 
       {message && (
-        <div className="result success-message" role="status">
+        <div className="result success-message">
           {message}
         </div>
       )}
 
       {error && (
-        <div className="result error-message" role="alert">
+        <div className="result error-message">
           {error}
         </div>
       )}
 
-      <section className="card">
-        <h2>Product Lookup &amp; QR Code</h2>
-        <p>
-          Enter any registered product ID to retrieve its information and
-          generate its QR code again. This section does not require MetaMask.
-        </p>
-
-        <form onSubmit={handleGenerateExistingQR}>
-          <label htmlFor="qrLookupId">Existing Product ID</label>
-          <input
-            id="qrLookupId"
-            type="number"
-            min="1"
-            value={qrLookupId}
-            onChange={(event) => setQrLookupId(event.target.value)}
-            placeholder="e.g. 2001"
-            required
-          />
-
-          <button type="submit" disabled={busy}>
-            Find Product &amp; Generate QR
-          </button>
-        </form>
-
-        {qrProductDetails && qrProductId && (
-          <div className="result">
-            <h3>Product Details</h3>
-            <p>
-              <strong>ID:</strong> {qrProductDetails.id}
-            </p>
-            <p>
-              <strong>Name:</strong> {qrProductDetails.name}
-            </p>
-            <p>
-              <strong>Manufacturer:</strong> {qrProductDetails.manufacturer}
-            </p>
-            <p>
-              <strong>Current owner:</strong>{" "}
-              {shortenAddress(qrProductDetails.currentOwner)}
-            </p>
-
-            <ProductQR productId={qrProductId} />
-          </div>
-        )}
-      </section>
-
-      {account && role === 1 && (
-        <section className="card">
-          <h2>Register a New Product</h2>
-          <p>Only a Manufacturer can register a product.</p>
-
-          <form onSubmit={handleRegisterProduct}>
-            <label htmlFor="productId">Product ID</label>
-            <input
-              id="productId"
-              type="number"
-              min="1"
-              value={productId}
-              onChange={(event) => setProductId(event.target.value)}
-              placeholder="e.g. 2002"
-              required
-            />
-
-            <label htmlFor="productName">Product Name</label>
-            <input
-              id="productName"
-              value={productName}
-              onChange={(event) => setProductName(event.target.value)}
-              placeholder="e.g. Smart Watch"
-              required
-            />
-
-            <label htmlFor="manufacturerName">Manufacturer Name</label>
-            <input
-              id="manufacturerName"
-              value={manufacturerName}
-              onChange={(event) => setManufacturerName(event.target.value)}
-              placeholder="e.g. ABC Electronics"
-              required
-            />
-
-            <button type="submit" disabled={busy}>
-              Register Product
-            </button>
-          </form>
-
-          {registeredProductId && (
-            <div className="result">
-              <h3>New Product Registered</h3>
-              <p>
-                Product ID: <strong>{registeredProductId}</strong>
-              </p>
-              <p>
-                You can retrieve this QR code later using the Product Lookup
-                section above.
-              </p>
-              <ProductQR productId={registeredProductId} />
-            </div>
-          )}
-        </section>
-      )}
-
+      {/* ADMIN ROLE ASSIGNMENT */}
       {account && isAdmin && (
         <section className="card">
-          <h2>Admin: Assign a Role</h2>
+          <h2>Admin: Assign Roles</h2>
 
           <form onSubmit={handleAssignRole}>
-            <label htmlFor="roleAddress">Wallet Address</label>
+            <label>Wallet Address</label>
+
             <input
-              id="roleAddress"
               value={roleAddress}
-              onChange={(event) => setRoleAddress(event.target.value)}
+              onChange={(e) => setRoleAddress(e.target.value)}
               placeholder="0x..."
               required
             />
 
-            <label htmlFor="selectedRole">Role</label>
+            <label>Select Role</label>
+
             <select
-              id="selectedRole"
               value={selectedRole}
-              onChange={(event) => setSelectedRole(event.target.value)}
+              onChange={(e) => setSelectedRole(e.target.value)}
             >
               <option value="1">Manufacturer</option>
               <option value="2">Supplier</option>
               <option value="3">Retailer</option>
               <option value="4">Consumer</option>
-              <option value="0">Unassigned</option>
             </select>
 
-            <button type="submit" disabled={busy}>
-              Assign Role
-            </button>
+            <button disabled={busy}>Assign Role</button>
           </form>
         </section>
       )}
 
-      {account && [1, 2, 3].includes(role) && (
+      {/* SMARTPHONE REGISTRATION */}
+      {account && role === 1 && (
         <section className="card">
-          <h2>Transfer Product Ownership</h2>
-          <p>
-            Your role is {ROLE_NAMES[role]}. The smart contract enforces the
-            permitted ownership-transfer sequence.
-          </p>
+          <h2>Register New Smartphone</h2>
 
-          <form onSubmit={handleTransferOwnership}>
-            <label htmlFor="transferId">Product ID</label>
+          <form onSubmit={handleRegisterSmartphone}>
+            <label>IMEI Number (15 digits)</label>
+
             <input
-              id="transferId"
-              type="number"
-              min="1"
-              value={transferId}
-              onChange={(event) => setTransferId(event.target.value)}
-              placeholder="e.g. 2001"
+              value={imei}
+              onChange={(e) => handleIMEIChange(e.target.value)}
+              placeholder="Enter 15-digit IMEI"
+              maxLength="15"
+              inputMode="numeric"
               required
             />
 
-            <label htmlFor="newOwner">Next Owner Wallet Address</label>
+            {tacLoading && (
+              <p>Identifying smartphone using TAC database...</p>
+            )}
+
+            {tacResult?.found && (
+              <div className="result success-message">
+                <h3>Device Identified</h3>
+                <p><strong>TAC:</strong> {tacResult.tac}</p>
+                <p><strong>Detected Brand:</strong> {tacResult.brand}</p>
+                <p><strong>Detected Model:</strong> {tacResult.model}</p>
+                <p>Brand and model have been filled automatically.</p>
+              </div>
+            )}
+
+            {tacResult && !tacResult.found && (
+              <div className="result">
+                <p>
+                  TAC not found in the local database.
+                  Please enter the brand and model manually.
+                </p>
+              </div>
+            )}
+
+            <label>Brand</label>
+
             <input
-              id="newOwner"
-              value={newOwner}
-              onChange={(event) => setNewOwner(event.target.value)}
-              placeholder="0x..."
+              value={brand}
+              onChange={(e) => setBrand(e.target.value)}
+              placeholder="Automatically detected or enter manually"
               required
             />
 
-            <button type="submit" disabled={busy}>
-              Transfer Ownership
+            <label>Model</label>
+
+            <input
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+              placeholder="Automatically detected or enter manually"
+              required
+            />
+
+            <label>Manufacturer</label>
+
+            <input
+              value={manufacturer}
+              onChange={(e) => setManufacturer(e.target.value)}
+              placeholder="e.g. Samsung Electronics"
+              required
+            />
+
+            <button disabled={busy || tacLoading}>
+              Register Smartphone
             </button>
           </form>
+
+          {registeredPhoneId && (
+            <div className="result success-message">
+              <h3>Smartphone Registered Successfully</h3>
+              <p>Smartphone ID: {registeredPhoneId}</p>
+            </div>
+          )}
         </section>
       )}
 
+      {/* IMEI VERIFICATION */}
       <section className="card">
-        <h2>Verify Product</h2>
+        <h2>Verify Smartphone Using IMEI</h2>
+
         <p>
-          Check whether a product is registered and view its current owner.
-          MetaMask is not required.
+          Enter the 15-digit IMEI to check its format and
+          registration status on the blockchain.
         </p>
 
-        <form onSubmit={handleVerifyProduct}>
-          <label htmlFor="verifyId">Product ID</label>
+        <form onSubmit={handleVerifyIMEI}>
+          <label>IMEI Number</label>
+
           <input
-            id="verifyId"
-            type="number"
-            min="1"
-            value={verifyId}
-            onChange={(event) => setVerifyId(event.target.value)}
-            placeholder="e.g. 2001"
+            value={verifyIMEI}
+            onChange={(e) => setVerifyIMEI(e.target.value)}
+            placeholder="Enter 15-digit IMEI"
+            maxLength="15"
+            inputMode="numeric"
             required
           />
 
-          <button type="submit" disabled={busy}>
-            Verify Product
-          </button>
+          <button disabled={busy}>Verify IMEI</button>
         </form>
 
         {verificationResult && (
           <div className="result">
-            {verificationResult.exists ? (
+            {verificationResult.status === "invalid" && (
               <>
-                <h3>Product Registered</h3>
+                <h3>Invalid IMEI</h3>
+                <p>The entered IMEI is not valid.</p>
+              </>
+            )}
+
+            {verificationResult.status === "notRegistered" && (
+              <>
+                <h3>Smartphone Not Registered</h3>
                 <p>
-                  <strong>Product ID:</strong> {verificationResult.id}
+                  This IMEI was not found in our blockchain registry.
                 </p>
+              </>
+            )}
+
+            {verificationResult.status === "registered" && (
+              <>
+                <h3>Smartphone Registered</h3>
+
+                <p><strong>Smartphone ID:</strong> {verificationResult.id}</p>
+                <p><strong>Brand:</strong> {verificationResult.brand}</p>
+                <p><strong>Model:</strong> {verificationResult.model}</p>
+                <p><strong>Manufacturer:</strong> {verificationResult.manufacturer}</p>
+                <p><strong>Current Owner:</strong> {verificationResult.currentOwner}</p>
+
                 <p>
-                  <strong>Name:</strong> {verificationResult.name}
-                </p>
-                <p>
-                  <strong>Manufacturer:</strong>{" "}
-                  {verificationResult.manufacturer}
-                </p>
-                <p>
-                  <strong>Current owner:</strong>{" "}
-                  {verificationResult.currentOwner}
-                </p>
-                <p>
-                  <strong>Registered at:</strong>{" "}
+                  <strong>Registered At:</strong>{" "}
                   {new Date(
                     Number(verificationResult.registeredAt) * 1000
                   ).toLocaleString()}
                 </p>
               </>
-            ) : (
-              <p>Product ID {verificationResult.id} is not registered.</p>
             )}
           </div>
         )}
       </section>
 
-      <section className="card">
-        <h2>Ownership History</h2>
-        <p>
-          View the on-chain registration and ownership-transfer records for a
-          product.
-        </p>
+      {/* TRANSFER OWNERSHIP USING IMEI */}
+      {account && [1, 2, 3].includes(role) && (
+        <section className="card">
+          <h2>Transfer Smartphone Ownership</h2>
 
-        <form onSubmit={handleLoadHistory}>
-          <label htmlFor="historyId">Product ID</label>
+          <form onSubmit={handleTransferOwnership}>
+            <label>Smartphone IMEI Number</label>
+
+            <input
+              value={transferIMEI}
+              onChange={(e) => setTransferIMEI(e.target.value)}
+              placeholder="Enter 15-digit IMEI"
+              maxLength="15"
+              inputMode="numeric"
+              required
+            />
+
+            <label>Next Owner Wallet Address</label>
+
+            <input
+              value={newOwner}
+              onChange={(e) => setNewOwner(e.target.value)}
+              placeholder="0x..."
+              required
+            />
+
+            <button disabled={busy}>
+              Transfer Smartphone Ownership
+            </button>
+          </form>
+        </section>
+      )}
+
+      {/* QR CODE LOOKUP */}
+      <section className="card">
+        <h2>Smartphone QR Code Lookup</h2>
+
+        <form onSubmit={handleQRLookup}>
+          <label>Smartphone ID</label>
+
           <input
-            id="historyId"
-            type="number"
-            min="1"
-            value={historyId}
-            onChange={(event) => setHistoryId(event.target.value)}
-            placeholder="e.g. 2001"
+            value={qrPhoneId}
+            onChange={(e) => setQrPhoneId(e.target.value)}
+            placeholder="Enter smartphone ID"
             required
           />
 
-          <button type="submit" disabled={busy}>
-            Load History
+          <button disabled={busy}>
+            Find Smartphone & Generate QR
           </button>
         </form>
 
-        {history.length > 0 && (
-          <div className="history-list">
-            {history.map((record, index) => (
-              <div className="history-item" key={`${record.timestamp}-${index}`}>
-                <h3>Record {index + 1}</h3>
-                <p>
-                  <strong>Previous owner:</strong>{" "}
-                  {record.previousOwner}
-                </p>
-                <p>
-                  <strong>New owner:</strong> {record.newOwner}
-                </p>
-                <p>
-                  <strong>Timestamp:</strong>{" "}
-                  {new Date(
-                    Number(record.timestamp) * 1000
-                  ).toLocaleString()}
-                </p>
-              </div>
-            ))}
-          </div>
-        )}
+        {qrDetails && (
+          <div className="result">
+            <h3>Smartphone Details</h3>
 
-        {history.length === 0 && historyId && (
-          <p>No history loaded yet, or the selected product has no records.</p>
+            <p><strong>ID:</strong> {qrDetails.id}</p>
+            <p><strong>Brand:</strong> {qrDetails.brand}</p>
+            <p><strong>Model:</strong> {qrDetails.model}</p>
+            <p><strong>Manufacturer:</strong> {qrDetails.manufacturer}</p>
+            <p>
+              <strong>Current Owner:</strong>{" "}
+              {shortenAddress(qrDetails.currentOwner)}
+            </p>
+
+            <ProductQR productId={qrDetails.id} />
+          </div>
         )}
       </section>
 
+      {/* OWNERSHIP HISTORY USING IMEI */}
+      <section className="card">
+        <h2>Ownership History</h2>
+
+        <form onSubmit={handleLoadHistory}>
+          <label>Smartphone IMEI Number</label>
+
+          <input
+            value={historyIMEI}
+            onChange={(e) => setHistoryIMEI(e.target.value)}
+            placeholder="Enter 15-digit IMEI"
+            maxLength="15"
+            inputMode="numeric"
+            required
+          />
+
+          <button disabled={busy}>
+            View Ownership History
+          </button>
+        </form>
+
+        {history.map((record, index) => (
+          <div className="history-item" key={index}>
+            <h3>Record {index + 1}</h3>
+
+            <p>
+              <strong>Previous Owner:</strong>{" "}
+              {record.previousOwner ===
+              "0x0000000000000000000000000000000000000000"
+                ? "Initial Registration"
+                : record.previousOwner}
+            </p>
+
+            <p>
+              <strong>New Owner:</strong> {record.newOwner}
+            </p>
+
+            <p>
+              <strong>Timestamp:</strong>{" "}
+              {new Date(
+                Number(record.timestamp) * 1000
+              ).toLocaleString()}
+            </p>
+          </div>
+        ))}
+      </section>
+
       <footer className="app-footer">
-        <p>
-          Network: Ethereum Sepolia testnet
-        </p>
-        <p>
-          Contract: {shortenAddress(contractAddress)}
-        </p>
+        <p>Network: Ethereum Sepolia Testnet</p>
+
+        <p>Contract: {shortenAddress(CONTRACT_ADDRESS)}</p>
+
         <p>
           <a
-            href="https://sepolia.etherscan.io/address/0xfC78A41Dc3cbDC228231A3F5Ec5f9fde98d6669A"
+            href={`https://sepolia.etherscan.io/address/${CONTRACT_ADDRESS}`}
             target="_blank"
             rel="noreferrer"
           >
-            View contract on Sepolia Etherscan
+            View Smart Contract on Etherscan
           </a>
         </p>
       </footer>
+
     </main>
   );
-}
-
-function ethersAddressIsValid(address) {
-  return /^0x[a-fA-F0-9]{40}$/.test(address.trim());
 }
 
 export default App;

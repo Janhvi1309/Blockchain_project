@@ -1,46 +1,44 @@
-// src/VerifyProduct.jsx
+
 import { useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
-import { contractAddress, getReadOnlyContract } from "./contract";
-import "./App.css";
+import { useParams } from "react-router-dom";
+import { getContract } from "./contract";
 
 function VerifyProduct() {
   const { productId } = useParams();
-  const [product, setProduct] = useState(null);
+
+  const [phone, setPhone] = useState(null);
   const [history, setHistory] = useState([]);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    let cancelled = false;
-
-    async function loadProduct() {
-      setLoading(true);
-      setError("");
-      setProduct(null);
-      setHistory([]);
-
+    async function loadSmartphone() {
       try {
-        if (!/^\d+$/.test(productId || "")) {
-          throw new Error("Invalid product ID.");
-        }
+        setLoading(true);
+        setError("");
 
-        const contract = getReadOnlyContract();
-        const id = BigInt(productId);
-        const exists = await contract.verifyProduct(id);
+        const contract = await getContract(false);
 
-        if (!exists) {
-          throw new Error("This product is not registered on the blockchain.");
-        }
+        const details = await contract.getSmartphoneById(productId);
 
-        const details = await contract.getProduct(id);
-        const count = Number(await contract.getTransferCount(id));
+        setPhone({
+          id: details.id.toString(),
+          brand: details.brand,
+          model: details.model,
+          manufacturer: details.manufacturer,
+          currentOwner: details.currentOwner,
+          registeredAt: details.registeredAt.toString()
+        });
+
+        const count = Number(
+          await contract.getTransferCount(productId)
+        );
 
         const records = await Promise.all(
           Array.from({ length: count }, async (_, index) => {
             const record = await contract.getTransferRecord(
-              id,
-              BigInt(index)
+              productId,
+              index
             );
 
             return {
@@ -51,112 +49,118 @@ function VerifyProduct() {
           })
         );
 
-        if (!cancelled) {
-          setProduct({
-            id: details.id.toString(),
-            name: details.name,
-            manufacturer: details.manufacturer,
-            currentOwner: details.currentOwner,
-            registeredAt: details.registeredAt.toString()
-          });
-          setHistory(records);
-        }
+        setHistory(records);
       } catch (err) {
-        if (!cancelled) {
-          setError(err.message || "Unable to verify this product.");
-        }
+        console.error("Smartphone verification error:", err);
+        setPhone(null);
+        setHistory([]);
+        setError(
+          "Smartphone not found in the blockchain registry."
+        );
       } finally {
-        if (!cancelled) setLoading(false);
+        setLoading(false);
       }
     }
 
-    loadProduct();
-
-    return () => {
-      cancelled = true;
-    };
+    if (productId && /^\d+$/.test(productId)) {
+      loadSmartphone();
+    } else {
+      setError("Invalid smartphone ID.");
+      setLoading(false);
+    }
   }, [productId]);
+
+  if (loading) {
+    return (
+      <main className="app">
+        <h2>Verifying smartphone...</h2>
+      </main>
+    );
+  }
+
+  if (error) {
+    return (
+      <main className="app">
+        <header className="app-header">
+          <h1>Smartphone Verification</h1>
+        </header>
+
+        <div className="result error-message">
+          <h2>Verification Failed</h2>
+          <p>{error}</p>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="app">
       <header className="app-header">
-        <h1>Product Authenticity Verification</h1>
-        <p>Product information and ownership records from the blockchain.</p>
+        <h1>Smartphone Verification</h1>
+        <p>
+          Blockchain-based smartphone authenticity
+          verification and ownership traceability.
+        </p>
       </header>
 
       <section className="card">
-        {loading && <p>Checking the blockchain...</p>}
+        <h2>Smartphone Registered</h2>
 
-        {error && (
-          <div className="result error-message">
-            <h2>Verification Failed</h2>
-            <p>{error}</p>
-          </div>
-        )}
+        <div className="result success-message">
+          <h3>Smartphone Found in Blockchain Registry</h3>
+        </div>
 
-        {product && !loading && (
-          <div className="result">
-            <h2>Product Registered</h2>
-            <p>
-              <strong>Product ID:</strong> {product.id}
-            </p>
-            <p>
-              <strong>Product name:</strong> {product.name}
-            </p>
-            <p>
-              <strong>Manufacturer:</strong> {product.manufacturer}
-            </p>
-            <p>
-              <strong>Current owner:</strong> {product.currentOwner}
-            </p>
-            <p>
-              <strong>Registration time:</strong>{" "}
-              {new Date(
-                Number(product.registeredAt) * 1000
-              ).toLocaleString()}
-            </p>
-
-            <h3>Ownership History</h3>
-
-            {history.map((record, index) => (
-              <div
-                className="history-item"
-                key={`${record.timestamp}-${index}`}
-              >
-                <h4>Record {index + 1}</h4>
-                <p>
-                  <strong>Previous owner:</strong> {record.previousOwner}
-                </p>
-                <p>
-                  <strong>New owner:</strong> {record.newOwner}
-                </p>
-                <p>
-                  <strong>Time:</strong>{" "}
-                  {new Date(
-                    Number(record.timestamp) * 1000
-                  ).toLocaleString()}
-                </p>
-              </div>
-            ))}
-          </div>
-        )}
+        <p><strong>Smartphone ID:</strong> {phone.id}</p>
+        <p><strong>Brand:</strong> {phone.brand}</p>
+        <p><strong>Model:</strong> {phone.model}</p>
+        <p><strong>Manufacturer:</strong> {phone.manufacturer}</p>
+        <p><strong>Current Owner:</strong> {phone.currentOwner}</p>
 
         <p>
-          <strong>Smart contract:</strong> {contractAddress}
+          <strong>Registration Date:</strong>{" "}
+          {new Date(
+            Number(phone.registeredAt) * 1000
+          ).toLocaleString()}
         </p>
-
-        <p>
-          <a
-            href={`https://sepolia.etherscan.io/address/${contractAddress}`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            View contract on Etherscan
-          </a>
-        </p>
-
-        <Link to="/">Return to the application</Link>
       </section>
+
+      <section className="card">
+        <h2>Ownership History</h2>
+
+        {history.length === 0 ? (
+          <p>No ownership records found.</p>
+        ) : (
+          history.map((record, index) => (
+            <div className="history-item" key={index}>
+              <h3>Record {index + 1}</h3>
+
+              <p>
+                <strong>Previous Owner:</strong>{" "}
+                {record.previousOwner ===
+                "0x0000000000000000000000000000000000000000"
+                  ? "Initial Registration"
+                  : record.previousOwner}
+              </p>
+
+              <p>
+                <strong>New Owner:</strong>{" "}
+                {record.newOwner}
+              </p>
+
+              <p>
+                <strong>Date:</strong>{" "}
+                {new Date(
+                  Number(record.timestamp) * 1000
+                ).toLocaleString()}
+              </p>
+            </div>
+          ))
+        )}
+      </section>
+
+      <footer className="app-footer">
+        <p>Verified using Ethereum Sepolia blockchain.</p>
+      </footer>
     </main>
   );
 }
